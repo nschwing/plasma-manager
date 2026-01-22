@@ -31,6 +31,29 @@ let
           example = 24;
           description = "The size of the cursor. See the System Settings app for allowed sizes for each cursor theme.";
         };
+        cursorFeedback = lib.mkOption {
+          type = nullOr (enum [
+            "Bouncing"
+            "Blinking"
+            "Static"
+            "None"
+          ]);
+          default = null;
+          example = "Bouncing";
+          description = "The cursor feedback icon after launching an application.";
+        };
+        taskManagerFeedback = lib.mkOption {
+          type = nullOr bool;
+          default = null;
+          example = true;
+          description = "The feedback wheel on an application icon after launching an application from the task manager.";
+        };
+        animationTime = lib.mkOption {
+          type = nullOr ints.positive;
+          default = null;
+          example = 5;
+          description = "The duration that the cursorFeedback and taskManagerFeedback run for.";
+        };
       };
     };
 
@@ -99,7 +122,7 @@ in
       default = null;
       example = false;
       description = ''
-        Whether clicking the middle mouse button pastes the clipboard content.";
+        Whether clicking the middle mouse button pastes the clipboard content.
       '';
     };
 
@@ -136,9 +159,12 @@ in
       example = {
         theme = "Breeze_Snow";
         size = 24;
+        cursorFeedback = "Bouncing";
+        taskManagerFeedback = true;
+        animationTime = 5;
       };
       description = ''
-        Submodule for configuring the cursor appearance. Both the theme and size are configurable.
+        Submodule for configuring the cursor appearance. The theme, size, cursor feedback, task manager feedback, and animation time are configurable.
       '';
     };
 
@@ -161,7 +187,7 @@ in
     };
 
     wallpaper = lib.mkOption {
-      type = with lib.types; nullOr path;
+      type = with lib.types; nullOr (either path (listOf path));
       default = null;
       example = lib.literalExpression ''"''${pkgs.kdePackages.plasma-workspace-wallpapers}/share/wallpapers/Kay/contents/images/1080x1920.png"'';
       description = ''
@@ -273,6 +299,15 @@ in
         '';
       };
     };
+
+    widgetStyle = lib.mkOption {
+      type = with lib.types; nullOr str;
+      default = null;
+      example = "breeze";
+      description = ''
+        The widget style to use with Plasma.
+      '';
+    };
   };
 
   config = (
@@ -344,6 +379,9 @@ in
               KDE.SingleClick = (
                 lib.mkIf (cfg.workspace.clickItemTo != null) (cfg.workspace.clickItemTo == "open")
               );
+              KDE.widgetStyle = (
+                lib.mkIf (cfg.workspace.widgetStyle != null) (cfg.workspace.widgetStyle)
+              );
               Sounds.Theme = (lib.mkIf (cfg.workspace.soundTheme != null) cfg.workspace.soundTheme);
             };
             plasmarc = (
@@ -354,6 +392,50 @@ in
                 Mouse.cursorSize = cfg.workspace.cursor.size;
               }
             );
+            klaunchrc = lib.mkMerge [
+              (lib.mkIf (cfg.workspace.cursor != null && cfg.workspace.cursor.cursorFeedback != null) (
+                {
+                  "None" = {
+                    BusyCursorSettings = {
+                      Blinking = false;
+                      Bouncing = false;
+                    };
+                    FeedbackStyle.BusyCursor = false;
+                  };
+                  "Static" = {
+                    BusyCursorSettings = {
+                      Blinking = false;
+                      Bouncing = false;
+                    };
+                    FeedbackStyle.BusyCursor = true;
+                  };
+                  "Blinking" = {
+                    BusyCursorSettings = {
+                      Blinking = true;
+                      Bouncing = false;
+                    };
+                    FeedbackStyle.BusyCursor = true;
+                  };
+                  "Bouncing" = {
+                    BusyCursorSettings = {
+                      Blinking = false;
+                      Bouncing = true;
+                    };
+                    FeedbackStyle.BusyCursor = true;
+                  };
+                }
+                .${cfg.workspace.cursor.cursorFeedback}
+              ))
+
+              (lib.mkIf (cfg.workspace.cursor != null && cfg.workspace.cursor.taskManagerFeedback != null) {
+                FeedbackStyle.TaskbarButton = cfg.workspace.cursor.taskManagerFeedback;
+              })
+
+              (lib.mkIf (cfg.workspace.cursor != null && cfg.workspace.cursor.animationTime != null) {
+                BusyCursorSettings.Timeout = cfg.workspace.cursor.animationTime;
+                TaskbarButtonSettings.Timeout = cfg.workspace.cursor.animationTime;
+              })
+            ];
             ksplashrc.KSplash = (
               lib.mkIf (cfg.workspace.splashScreen.theme != null) {
                 Engine = (
@@ -365,14 +447,15 @@ in
                 Theme = cfg.workspace.splashScreen.theme;
               }
             );
-            kwinrc =
+            kwinrc = lib.mkMerge [
               (lib.mkIf (cfg.workspace.windowDecorations.theme != null) {
                 "org.kde.kdecoration2".library = cfg.workspace.windowDecorations.library;
                 "org.kde.kdecoration2".theme = cfg.workspace.windowDecorations.theme;
               })
-              // (lib.optionalAttrs (cfg.workspace.enableMiddleClickPaste != null) {
+              (lib.mkIf (cfg.workspace.enableMiddleClickPaste != null) {
                 Wayland.EnablePrimarySelection = cfg.workspace.enableMiddleClickPaste;
-              });
+              })
+            ];
           }
           # We add persistence to some keys in order to not reset the themes on
           # each generation when we use overrideConfig.
@@ -453,7 +536,23 @@ in
               for (const desktop of allDesktops) {
                   desktop.wallpaperPlugin = "org.kde.image";
                   desktop.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];
-                  desktop.writeConfig("Image", "file://${toString cfg.workspace.wallpaper}");
+                  ${
+                    if (builtins.typeOf cfg.workspace.wallpaper) == "list" then
+                      ''
+                        let images = [
+                        ${
+                          builtins.concatStringsSep "\n," (map (
+                            wallpaper: ''"file://${toString wallpaper}"''
+                          ) cfg.workspace.wallpaper)
+                        }
+                        ];
+                        let image = images[desktop.screen];''
+                    else
+                      ''let image = "file://${toString cfg.workspace.wallpaper}";''
+                  }
+                  if (image) {
+                    desktop.writeConfig("Image", image);
+                  }
                   ${
                     lib.optionalString (cfg.workspace.wallpaperFillMode != null)
                       ''desktop.writeConfig("FillMode", "${
